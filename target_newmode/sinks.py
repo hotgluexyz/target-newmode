@@ -7,26 +7,34 @@ from typing import Any
 from hotglue_etl_exceptions import InvalidPayloadError
 
 from target_newmode.client import NewModeSink
-from target_newmode.contact_lookup import flatten_contact
+from target_newmode.contact_lookup import ContactLookupMixin, flatten_contact
 from target_newmode.unified_mapping import (
     UNSUBSCRIBED_STATUSES,
     build_contact_payload,
 )
+
+CONTACT_TYPE = "contact--contact"
+CONTACT_GROUP_TYPE = "contact_group--contact_group"
+ORGANIZATION_TYPE = "group--organization"
 
 ID_KEY = "_newmode_id"
 EXISTING_GROUPS_KEY = "_newmode_existing_groups"
 INTERNAL_KEYS = frozenset({ID_KEY, EXISTING_GROUPS_KEY})
 
 
-class ContactsSink(NewModeSink):
+class ContactsSink(ContactLookupMixin, NewModeSink):
     """Unified Contacts sink for New/Mode."""
 
     name = "Contacts"
+    endpoint = "contact/contact"
+    contact_groups_endpoint = "contact_group/contact_group"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._pending_groups: list[dict[str, str]] = []
         self._unsupported_fields_logged: set[str] = set()
+        self._contact_groups_by_title: dict[str, dict[str, Any]] = {}
+        self._contact_groups_loaded = False
 
     def build_record_hash(self, record: dict) -> str:
         """Hash the incoming intent, not the lookup results.
@@ -129,6 +137,83 @@ class ContactsSink(NewModeSink):
 
         return payload
 
+    def ensure_contact_groups_loaded(self) -> None:
+        """Lazy-load contact groups when list membership is first needed."""
+        if self._contact_groups_loaded:
+            return
+        self.logger.info("Loading contact groups into cache")
+        for group in self._paginate(self.contact_groups_endpoint):
+            self._register_contact_group(group)
+        self._contact_groups_loaded = True
+
+    def _register_contact_group(self, group: dict[str, Any]) -> None:
+        """Store a contact group under its title and lowercase alias."""
+        title = (group.get("attributes") or {}).get("title")
+        if not title:
+            return
+        self._contact_groups_by_title[str(title)] = group
+        self._contact_groups_by_title[str(title).lower()] = group
+
+    def get_contact_group(self, title: str) -> dict[str, Any] | None:
+        """Return a contact group by title without creating it."""
+        self.ensure_contact_groups_loaded()
+        trimmed = title.strip()
+        return self._contact_groups_by_title.get(trimmed) or self._contact_groups_by_title.get(
+            trimmed.lower(),
+        )
+
+    def get_or_create_contact_group(self, title: str) -> dict[str, Any]:
+        """Return a contact group by title, creating it when missing."""
+        existing = self.get_contact_group(title)
+        if existing:
+            return existing
+        trimmed = title.strip()
+        self.logger.info("Creating contact group '%s'", trimmed)
+        response = self.request_api(
+            "POST",
+            endpoint=self.contact_groups_endpoint,
+            request_data={
+                "data": {
+                    "type": CONTACT_GROUP_TYPE,
+                    "attributes": {"title": trimmed, "org_id": self.org_id},
+                },
+            },
+        )
+        group = response.json().get("data") or {}
+        self._register_contact_group(group)
+        return group
+
+    @staticmethod
+    def build_resource(
+        attributes: dict[str, Any],
+        resource_id: str | None = None,
+        relationships: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Wrap contact attributes in a JSON:API document."""
+        resource: dict[str, Any] = {"type": CONTACT_TYPE, "attributes": attributes}
+        if resource_id:
+            resource["id"] = resource_id
+        if relationships:
+            resource["relationships"] = relationships
+        return {"data": resource}
+
+    @staticmethod
+    def build_group_relationship(group_ids: list[str]) -> dict[str, Any]:
+        """Build the `groups` relationship for a contact resource."""
+        return {
+            "groups": {
+                "data": [
+                    {"type": CONTACT_GROUP_TYPE, "id": group_id} for group_id in group_ids
+                ],
+            },
+        }
+
+    def build_org_relationship(self) -> dict[str, Any]:
+        """Build the `gid` relationship linking a new contact to the organization."""
+        if not self.org_uuid:
+            return {}
+        return {"gid": {"data": {"type": ORGANIZATION_TYPE, "id": self.org_uuid}}}
+
     def resolve_group_ids(self, existing_group_ids: list[str]) -> list[str]:
         """Merge current membership with the pending list entries."""
         group_ids = list(dict.fromkeys(str(group_id) for group_id in existing_group_ids))
@@ -161,14 +246,14 @@ class ContactsSink(NewModeSink):
             payload = self.build_resource(record, resource_id=contact_id, relationships=relationships)
             response = self.request_api(
                 "PATCH",
-                endpoint=f"contact/contact/{contact_id}",
+                endpoint=f"{self.endpoint}/{contact_id}",
                 request_data=payload,
             )
             state_dict["is_updated"] = True
         else:
             relationships.update(self.build_org_relationship())
             payload = self.build_resource(record, relationships=relationships)
-            response = self.request_api("POST", endpoint="contact/contact", request_data=payload)
+            response = self.request_api("POST", endpoint=self.endpoint, request_data=payload)
 
         contact = flatten_contact(response.json().get("data") or {})
         state_dict["success"] = response.ok

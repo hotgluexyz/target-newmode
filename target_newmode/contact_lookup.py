@@ -98,7 +98,7 @@ class ContactLookupMixin:
         params: dict[str, Any] = {"page[limit]": SEARCH_RESULT_LIMIT}
         for attribute, value in filters.items():
             params[f"filter[{attribute}]"] = value
-        response = self.request_api("GET", endpoint="contact/contact", params=params)
+        response = self.request_api("GET", endpoint=self.endpoint, params=params)
         resources = response.json().get("data") or []
         if not isinstance(resources, list):
             return []
@@ -213,7 +213,7 @@ class ContactLookupMixin:
     def _fetch_contact_by_id(self, contact_id: str) -> dict[str, Any] | None:
         """Fetch a contact by its New/Mode uuid."""
         try:
-            response = self.request_api("GET", endpoint=f"contact/contact/{contact_id}")
+            response = self.request_api("GET", endpoint=f"{self.endpoint}/{contact_id}")
         except FatalAPIError:
             return None
         resource = response.json().get("data")
