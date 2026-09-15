@@ -115,11 +115,7 @@ class ContactLookupMixin:
             for contact in contacts:
                 if str(contact.get("id")) == str(record_id):
                     return contact
-        return sorted(
-            contacts,
-            key=lambda contact: str(contact.get("changed") or ""),
-            reverse=True,
-        )[0]
+        return max(contacts, key=lambda contact: str(contact.get("changed") or ""))
 
     def _warn_duplicates(
         self,

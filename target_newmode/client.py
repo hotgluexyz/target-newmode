@@ -20,7 +20,6 @@ PAGE_SIZE = 50
 class NewModeSink(HotglueSink):
     """Base sink for New/Mode JSON:API interactions."""
 
-    auth_state: dict = {}
     page_size = PAGE_SIZE
 
     def __init__(
@@ -31,6 +30,7 @@ class NewModeSink(HotglueSink):
         key_properties: list[str] | None,
     ) -> None:
         super().__init__(target, stream_name, schema, key_properties)
+        self.auth_state: dict = {}
         self._org_id: int | None = None
         self._org_uuid: str | None = None
         self._org_loaded = False

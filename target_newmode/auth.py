@@ -37,7 +37,7 @@ class NewModeAuthenticator(OAuthAuthenticator):
         try:
             token_response.raise_for_status()
             self.logger.info("OAuth authorization attempt was successful.")
-        except Exception as ex:
+        except requests.HTTPError as ex:
             self.state.update({"auth_error_response": token_response.json()})
             raise RuntimeError(
                 f"Failed OAuth login, response was '{token_response.json()}'. {ex}",
@@ -47,7 +47,8 @@ class NewModeAuthenticator(OAuthAuthenticator):
         self.access_token = token_json["access_token"]
 
         self._config["access_token"] = token_json["access_token"]
-        now = round(datetime.utcnow().timestamp())
+        # Same clock as OAuthAuthenticator.is_token_valid, so the stored expiry compares correctly.
+        now = round(datetime.utcnow().timestamp())  # noqa: DTZ003
         self._config["expires_in"] = int(token_json["expires_in"]) + now
 
         with open(self._config_file_path, "w") as outfile:
