@@ -1,9 +1,8 @@
-"""New/Mode target base sink with HTTP, JSON:API helpers, and entity caches."""
+"""New/Mode base sink with the HTTP, auth, and JSON:API behavior shared by all sinks."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from typing import Any
 
 import requests
@@ -13,30 +12,14 @@ from hotglue_singer_sdk.plugin_base import PluginBase
 from hotglue_singer_sdk.target_sdk.client import HotglueSink
 from hotglue_singer_sdk.target_sdk.common import HGJSONEncoder
 
-from target_newmode.contact_lookup import ContactLookupMixin
-
-CONTACT_TYPE = "contact--contact"
-CONTACT_GROUP_TYPE = "contact_group--contact_group"
-ORGANIZATION_TYPE = "group--organization"
-
 JSON_API_MEDIA_TYPE = "application/vnd.api+json"
 DEFAULT_BASE_URL = "https://base.newmode.net"
 PAGE_SIZE = 50
 
 
-@dataclass
-class _NewModeCache:
-    contact_groups_by_title: dict[str, dict[str, Any]] = field(default_factory=dict)
-    contact_groups_loaded: bool = False
-    org_id: int | None = None
-    org_uuid: str | None = None
-    org_loaded: bool = False
-
-
-class NewModeSink(ContactLookupMixin, HotglueSink):
+class NewModeSink(HotglueSink):
     """Base sink for New/Mode JSON:API interactions."""
 
-    auth_state: dict = {}
     page_size = PAGE_SIZE
 
     def __init__(
@@ -47,7 +30,10 @@ class NewModeSink(ContactLookupMixin, HotglueSink):
         key_properties: list[str] | None,
     ) -> None:
         super().__init__(target, stream_name, schema, key_properties)
-        self._cache = _NewModeCache()
+        self.auth_state: dict = {}
+        self._org_id: int | None = None
+        self._org_uuid: str | None = None
+        self._org_loaded = False
 
     @property
     def api_base_url(self) -> str:
@@ -56,10 +42,6 @@ class NewModeSink(ContactLookupMixin, HotglueSink):
     @property
     def base_url(self) -> str:
         return f"{self.api_base_url}/jsonapi/"
-
-    @property
-    def endpoint(self) -> str:
-        return "contact/contact"
 
     @property
     def http_headers(self) -> dict[str, str]:
@@ -81,8 +63,9 @@ class NewModeSink(ContactLookupMixin, HotglueSink):
     ) -> requests.Response:
         """Issue a request with the JSON:API media type.
 
-        The SDK forces `Content-Type: application/json`, which New/Mode rejects
-        with a 415, so the request is built here instead.
+        `Rest._request` sets `Content-Type: application/json` after applying
+        `default_headers`, so a Content-Type set there is overwritten, and
+        New/Mode rejects `application/json` with a 415.
         """
         request_headers = dict(headers or {})
         request_headers.update(self.default_headers)
@@ -151,115 +134,37 @@ class NewModeSink(ContactLookupMixin, HotglueSink):
 
     def ensure_org_loaded(self) -> None:
         """Resolve the organization the API credentials belong to."""
-        if self._cache.org_loaded:
+        if self._org_loaded:
             return
-        self._cache.org_id = self.config.get("org_id")
-        self._cache.org_uuid = self.config.get("gid")
-        if self._cache.org_id is None or self._cache.org_uuid is None:
+        self._org_id = self.config.get("org_id")
+        self._org_uuid = self.config.get("gid")
+        if self._org_id is None or self._org_uuid is None:
             organizations = self._paginate("group/organization")
             if organizations:
                 organization = organizations[0]
-                if self._cache.org_uuid is None:
-                    self._cache.org_uuid = organization.get("id")
-                if self._cache.org_id is None:
-                    self._cache.org_id = (organization.get("attributes") or {}).get(
-                        "drupal_internal__id",
-                    )
+                attributes = organization.get("attributes") or {}
+                if self._org_uuid is None:
+                    self._org_uuid = organization.get("id")
+                if self._org_id is None:
+                    self._org_id = attributes.get("drupal_internal__id")
                 self.logger.info(
                     "Resolved New/Mode organization '%s' (org_id %s)",
-                    (organization.get("attributes") or {}).get("label"),
-                    self._cache.org_id,
+                    attributes.get("label"),
+                    self._org_id,
                 )
-        self._cache.org_loaded = True
+        self._org_loaded = True
 
     @property
     def org_id(self) -> int | None:
-        """Numeric organization id stamped on every contact."""
+        """Numeric organization id New/Mode requires on org-scoped entities."""
         self.ensure_org_loaded()
-        return self._cache.org_id
+        return self._org_id
 
     @property
     def org_uuid(self) -> str | None:
-        """Organization uuid used for the contact `gid` relationship."""
+        """Organization uuid used for `gid` relationships."""
         self.ensure_org_loaded()
-        return self._cache.org_uuid
-
-    def ensure_contact_groups_loaded(self) -> None:
-        """Lazy-load contact groups when list membership is first needed."""
-        if self._cache.contact_groups_loaded:
-            return
-        self.logger.info("Loading contact groups into cache")
-        for group in self._paginate("contact_group/contact_group"):
-            self._register_contact_group(group)
-        self._cache.contact_groups_loaded = True
-
-    def _register_contact_group(self, group: dict[str, Any]) -> None:
-        """Store a contact group under its title and lowercase alias."""
-        title = (group.get("attributes") or {}).get("title")
-        if not title:
-            return
-        self._cache.contact_groups_by_title[str(title)] = group
-        self._cache.contact_groups_by_title[str(title).lower()] = group
-
-    def get_contact_group(self, title: str) -> dict[str, Any] | None:
-        """Return a contact group by title without creating it."""
-        self.ensure_contact_groups_loaded()
-        trimmed = title.strip()
-        return self._cache.contact_groups_by_title.get(
-            trimmed,
-        ) or self._cache.contact_groups_by_title.get(trimmed.lower())
-
-    def get_or_create_contact_group(self, title: str) -> dict[str, Any]:
-        """Return a contact group by title, creating it when missing."""
-        existing = self.get_contact_group(title)
-        if existing:
-            return existing
-        trimmed = title.strip()
-        self.logger.info("Creating contact group '%s'", trimmed)
-        response = self.request_api(
-            "POST",
-            endpoint="contact_group/contact_group",
-            request_data={
-                "data": {
-                    "type": CONTACT_GROUP_TYPE,
-                    "attributes": {"title": trimmed, "org_id": self.org_id},
-                },
-            },
-        )
-        group = response.json().get("data") or {}
-        self._register_contact_group(group)
-        return group
-
-    @staticmethod
-    def build_resource(
-        attributes: dict[str, Any],
-        resource_id: str | None = None,
-        relationships: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Wrap contact attributes in a JSON:API document."""
-        resource: dict[str, Any] = {"type": CONTACT_TYPE, "attributes": attributes}
-        if resource_id:
-            resource["id"] = resource_id
-        if relationships:
-            resource["relationships"] = relationships
-        return {"data": resource}
-
-    @staticmethod
-    def build_group_relationship(group_ids: list[str]) -> dict[str, Any]:
-        """Build the `groups` relationship for a contact resource."""
-        return {
-            "groups": {
-                "data": [
-                    {"type": CONTACT_GROUP_TYPE, "id": group_id} for group_id in group_ids
-                ],
-            },
-        }
-
-    def build_org_relationship(self) -> dict[str, Any]:
-        """Build the `gid` relationship linking a new contact to the organization."""
-        if not self.org_uuid:
-            return {}
-        return {"gid": {"data": {"type": ORGANIZATION_TYPE, "id": self.org_uuid}}}
+        return self._org_uuid
 
     def clean_null_values(self, data: Any) -> Any:
         """Remove null and blank values while preserving non-empty nested structures."""
