@@ -89,11 +89,13 @@ New/Mode requires `org_id` and `country` on every contact, and rejects a contact
 | `addresses[0]` | `street_address`, `city`, `region`, `postal_code`, `country`, `latitude`, `longitude` |
 | `subscribe_status` | `opt_in` |
 | `lists` | `groups` relationship (contact groups, created by title when missing) |
-| `custom_fields` | Only entries whose name matches a native contact attribute (for example `twitter_handle` or `nm_marketing_opt_in`) |
+| `custom_fields` | Only entries whose name matches a native contact attribute (for example `twitter_handle`) |
 
 `lists` entries may be plain strings or objects with `name` and `subscription_status`. Unsubscribed entries remove the contact from that group; existing group membership is preserved otherwise.
 
 New/Mode contacts have no tags and no user-defined custom fields, so unified `tags` and unmatched `custom_fields` are ignored with a warning.
+
+Fields New/Mode manages itself are never written, even as `custom_fields`, and are ignored with a warning: `id`, `drupal_internal__id`, `drupal_internal__revision_id`, `entitygroupfield`, `org_id`, `nm_marketing_opt_in`, `nm_product_opt_in`, `sync_status` and `latest_sync_status`.
 
 ## Source Authentication and Authorization
 
