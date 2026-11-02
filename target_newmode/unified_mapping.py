@@ -29,6 +29,22 @@ NEWMODE_NATIVE_CONTACT_FIELDS = frozenset(
     },
 )
 
+NEWMODE_MANAGED_CONTACT_FIELDS = frozenset(
+    {
+        "id",
+        "drupal_internal__id",
+        "drupal_internal_id",
+        "drupal_internal__revision_id",
+        "drupal_internal_revision_id",
+        "entitygroupfield",
+        "latest_sync_status",
+        "org_id",
+        "nm_marketing_opt_in",
+        "nm_product_opt_in",
+        "sync_status",
+    },
+)
+
 # Unified field name -> New/Mode contact attribute.
 UNIFIED_TO_NEWMODE: dict[str, str] = {
     "salutation": "honorific",
@@ -164,7 +180,7 @@ def build_contact_payload(record: dict[str, Any]) -> tuple[dict[str, Any], list[
     """Map a unified contact record to New/Mode contact attributes.
 
     Returns the attributes plus the names of custom fields that have no
-    New/Mode equivalent, so the caller can report them.
+    New/Mode equivalent or that New/Mode manages itself, so the caller can report them.
     """
     mobile_phone, alternate_phone = extract_phones(record)
     payload: dict[str, Any] = {
@@ -199,7 +215,10 @@ def build_contact_payload(record: dict[str, Any]) -> tuple[dict[str, Any], list[
         if not field_name:
             continue
         newmode_key = newmode_field_name(str(field_name))
-        if newmode_key not in NEWMODE_NATIVE_CONTACT_FIELDS:
+        if (
+            newmode_key in NEWMODE_MANAGED_CONTACT_FIELDS
+            or newmode_key not in NEWMODE_NATIVE_CONTACT_FIELDS
+        ):
             unmapped_custom_fields.append(str(field_name))
             continue
         payload[newmode_key] = coerce_contact_value(newmode_key, custom_field.get("value"))
